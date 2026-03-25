@@ -1,0 +1,1411 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TASKLY — Manajemen Tugas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getDatabase, ref, set, push, get, onValue, remove, update, query, orderByChild, equalTo } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // ============================================================
+  // 🔥 GANTI DENGAN KONFIGURASI FIREBASE ANDA
+  // ============================================================
+ const firebaseConfig = {
+  apiKey: "AIzaSyAAxapqBrLJNEuOgWWipYnSG1vZjNept3M",
+  authDomain: "taskmanagement-bfbaa.firebaseapp.com",
+  databaseURL: "https://taskmanagement-bfbaa-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "taskmanagement-bfbaa",
+  storageBucket: "taskmanagement-bfbaa.firebasestorage.app",
+  messagingSenderId: "647021279642",
+  appId: "1:647021279642:web:8b9d01d51cc39a7257e223"
+};
+  // ============================================================
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getDatabase(app);
+
+  // ---- bcrypt-like SHA-256 hash for extra layer ----
+  async function hashPassword(password) {
+    const salt = "TASKLY_SALT_2024_" + password.length;
+    const data = new TextEncoder().encode(salt + password);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // ===================== STATE =====================
+  let currentUser = null;
+  let currentPage = "tasks";
+  let allTasks = [];
+  let linkedUsersData = {};
+  let calendarDate = new Date();
+  let unsubscribeTasks = null;
+
+  // ===================== TOGGLES =====================
+  window.toggleAddTaskForm = function() {
+    const container = document.getElementById("add-task-container");
+    const btn = document.getElementById("toggle-add-task-btn");
+    if (container.style.display === "none") {
+      container.style.display = "block";
+      btn.innerHTML = "✕ Tutup";
+      btn.classList.add("active");
+    } else {
+      container.style.display = "none";
+      btn.innerHTML = "➕ Tambah Tugas";
+      btn.classList.remove("active");
+    }
+  };
+
+  window.toggleConnectForm = function() {
+    const container = document.getElementById("connect-user-container");
+    const btn = document.getElementById("toggle-connect-btn");
+    if (container.style.display === "none") {
+      container.style.display = "block";
+      btn.innerHTML = "✕ Tutup Panel";
+      btn.classList.add("active");
+    } else {
+      container.style.display = "none";
+      btn.innerHTML = "🔗 Hubungkan Pengguna";
+      btn.classList.remove("active");
+    }
+  };
+
+  // ===================== PRIORITY COLORS =====================
+  const priorityColors = {
+    high: "#FF5C5C",
+    medium: "#FFB347",
+    low: "#5CDB95"
+  };
+
+  // ===================== AUTH STATE =====================
+  onAuthStateChanged(auth, async (user) => {
+    if (user) {
+      currentUser = user;
+      document.getElementById("auth-screen").style.display = "none";
+      document.getElementById("app-screen").style.display = "flex";
+      document.getElementById("user-name-display").textContent = user.displayName || user.email.split("@")[0];
+      document.getElementById("user-email-display").textContent = user.email;
+      loadTasks();
+      loadLinkedUsers();
+    } else {
+      currentUser = null;
+      document.getElementById("auth-screen").style.display = "flex";
+      document.getElementById("app-screen").style.display = "none";
+      if (unsubscribeTasks) { unsubscribeTasks(); unsubscribeTasks = null; }
+    }
+  });
+
+  // ===================== REGISTER =====================
+  window.registerUser = async function() {
+    const name = document.getElementById("reg-name").value.trim();
+    const email = document.getElementById("reg-email").value.trim();
+    const password = document.getElementById("reg-password").value;
+    const confirm = document.getElementById("reg-confirm").value;
+    const errEl = document.getElementById("reg-error");
+
+    if (!name || !email || !password) { errEl.textContent = "Semua field harus diisi."; return; }
+    if (password !== confirm) { errEl.textContent = "Password tidak cocok."; return; }
+    if (password.length < 6) { errEl.textContent = "Password minimal 6 karakter."; return; }
+
+    errEl.textContent = "";
+    const btn = document.getElementById("reg-btn");
+    btn.textContent = "Mendaftar..."; btn.disabled = true;
+
+    try {
+      const hashedPw = await hashPassword(password);
+      const cred = await createUserWithEmailAndPassword(auth, email, password);
+      await updateProfile(cred.user, { displayName: name });
+      // Save user profile with hashed password reference to DB
+      await set(ref(db, `users/${cred.user.uid}`), {
+        displayName: name,
+        email: email,
+        passwordHash: hashedPw,
+        createdAt: Date.now(),
+        linkedUsers: {}
+      });
+      showToast("Akun berhasil dibuat! 🎉");
+    } catch (e) {
+      errEl.textContent = firebaseErrMsg(e.code);
+      btn.textContent = "Daftar"; btn.disabled = false;
+    }
+  };
+
+  // ===================== LOGIN =====================
+  window.loginUser = async function() {
+    const email = document.getElementById("login-email").value.trim();
+    const password = document.getElementById("login-password").value;
+    const errEl = document.getElementById("login-error");
+
+    if (!email || !password) { errEl.textContent = "Email dan password harus diisi."; return; }
+    errEl.textContent = "";
+    const btn = document.getElementById("login-btn");
+    btn.textContent = "Masuk..."; btn.disabled = true;
+
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (e) {
+      errEl.textContent = firebaseErrMsg(e.code);
+      btn.textContent = "Masuk"; btn.disabled = false;
+    }
+  };
+
+  // ===================== LOGOUT =====================
+  window.logoutUser = async function() {
+    await signOut(auth);
+  };
+
+  // ===================== TASKS CRUD =====================
+  function loadTasks() {
+    if (!currentUser) return;
+    const tasksRef = ref(db, `tasks/${currentUser.uid}`);
+    unsubscribeTasks = onValue(tasksRef, (snapshot) => {
+      allTasks = [];
+      snapshot.forEach(child => {
+        allTasks.push({ id: child.key, ...child.val() });
+      });
+      allTasks.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      renderTaskList();
+      renderCalendar();
+    });
+  }
+
+  window.addTask = async function() {
+    const title = document.getElementById("task-title").value.trim();
+    const desc = document.getElementById("task-desc").value.trim();
+    const date = document.getElementById("task-date").value;
+    const priority = document.getElementById("task-priority").value;
+    const errEl = document.getElementById("task-error");
+
+    if (!title) { errEl.textContent = "Judul tugas harus diisi."; return; }
+    if (!date) { errEl.textContent = "Tanggal tugas harus diisi."; return; }
+    errEl.textContent = "";
+
+    const btn = document.getElementById("add-task-btn");
+    btn.textContent = "Menyimpan..."; btn.disabled = true;
+
+    try {
+      const newRef = push(ref(db, `tasks/${currentUser.uid}`));
+      await set(newRef, {
+        title, description: desc, dueDate: date,
+        priority, completed: false, createdAt: Date.now()
+      });
+      document.getElementById("task-title").value = "";
+      document.getElementById("task-desc").value = "";
+      document.getElementById("task-date").value = "";
+      document.getElementById("task-priority").value = "medium";
+      showToast("Tugas ditambahkan! ✓");
+    } catch (e) {
+      errEl.textContent = "Gagal menyimpan: " + e.message;
+    }
+    btn.textContent = "Tambah Tugas"; btn.disabled = false;
+  };
+
+  window.toggleTask = async function(taskId, current) {
+    await update(ref(db, `tasks/${currentUser.uid}/${taskId}`), { completed: !current });
+  };
+
+  window.deleteTask = async function(taskId) {
+    if (!confirm("Hapus tugas ini?")) return;
+    await remove(ref(db, `tasks/${currentUser.uid}/${taskId}`));
+    showToast("Tugas dihapus.");
+  };
+
+  // ===================== RENDER TASK LIST =====================
+  function renderTaskList() {
+    const container = document.getElementById("task-list-container");
+    const filter = document.getElementById("filter-status")?.value || "all";
+    let tasks = allTasks;
+    if (filter === "active") tasks = tasks.filter(t => !t.completed);
+    if (filter === "done") tasks = tasks.filter(t => t.completed);
+
+    const count = document.getElementById("task-count");
+    if (count) count.textContent = `${tasks.length} tugas`;
+
+    if (!tasks.length) {
+      container.innerHTML = `<div class="empty-state"><div class="empty-icon">📋</div><p>Belum ada tugas.<br>Tambahkan tugas baru di atas!</p></div>`;
+      return;
+    }
+
+    container.innerHTML = tasks.map(task => {
+      const pColor = priorityColors[task.priority] || "#888";
+      const dateStr = task.dueDate ? new Date(task.dueDate + "T00:00:00").toLocaleDateString("id-ID", { day:"numeric", month:"long", year:"numeric" }) : "";
+      const today = new Date().toISOString().split("T")[0];
+      const overdue = !task.completed && task.dueDate && task.dueDate < today;
+      return `
+        <div class="task-card ${task.completed ? "done" : ""} ${overdue ? "overdue" : ""}" onclick="toggleTask('${task.id}', ${task.completed})">
+          <div class="task-check ${task.completed ? "checked" : ""}">
+            ${task.completed ? "✓" : ""}
+          </div>
+          <div class="task-body">
+            <div class="task-title-row">
+              <span class="task-title">${escHtml(task.title)}</span>
+              <span class="priority-dot" style="background:${pColor}" title="${task.priority}">${task.priority.toUpperCase()}</span>
+            </div>
+            ${task.description ? `<p class="task-desc-text">${escHtml(task.description)}</p>` : ""}
+            <div class="task-meta">
+              ${dateStr ? `<span class="task-date ${overdue ? "overdue-text" : ""}">📅 ${dateStr}${overdue ? " · Terlambat!" : ""}</span>` : ""}
+            </div>
+          </div>
+          <button class="delete-btn" onclick="event.stopPropagation();deleteTask('${task.id}')" title="Hapus">×</button>
+        </div>`;
+    }).join("");
+  }
+
+  window.filterTasks = renderTaskList;
+
+  // ===================== LINKED USERS =====================
+  async function loadLinkedUsers() {
+    if (!currentUser) return;
+    const linksRef = ref(db, `users/${currentUser.uid}/linkedUsers`);
+    onValue(linksRef, async (snapshot) => {
+      linkedUsersData = {};
+      const uids = [];
+      snapshot.forEach(child => { uids.push(child.key); });
+
+      for (const uid of uids) {
+        const uSnap = await get(ref(db, `users/${uid}`));
+        if (uSnap.exists()) {
+          linkedUsersData[uid] = uSnap.val();
+          // Load their tasks
+          const tSnap = await get(ref(db, `tasks/${uid}`));
+          linkedUsersData[uid].tasks = [];
+          tSnap.forEach(ch => {
+            linkedUsersData[uid].tasks.push({ id: ch.key, ...ch.val() });
+          });
+        }
+      }
+      renderLinkedUsersList();
+      renderCalendar();
+    });
+  }
+
+  window.searchUserToLink = async function() {
+    const email = document.getElementById("link-email").value.trim().toLowerCase();
+    const resultEl = document.getElementById("link-result");
+    if (!email) { resultEl.innerHTML = ""; return; }
+    if (email === currentUser.email.toLowerCase()) {
+      resultEl.innerHTML = `<div class="link-result-item error">Tidak bisa menghubungkan dengan diri sendiri.</div>`;
+      return;
+    }
+    resultEl.innerHTML = `<div class="link-result-item searching">Mencari...</div>`;
+
+    try {
+      const usersRef = ref(db, "users");
+      const snap = await get(usersRef);
+      let found = null;
+      snap.forEach(child => {
+        if (child.val().email?.toLowerCase() === email) {
+          found = { uid: child.key, ...child.val() };
+        }
+      });
+
+      if (!found) {
+        resultEl.innerHTML = `<div class="link-result-item error">Pengguna tidak ditemukan.</div>`;
+        return;
+      }
+
+      const alreadyLinked = linkedUsersData[found.uid];
+      resultEl.innerHTML = `
+        <div class="link-result-item">
+          <div class="link-user-info">
+            <div class="link-avatar">${(found.displayName || "U")[0].toUpperCase()}</div>
+            <div>
+              <strong>${escHtml(found.displayName || "")}</strong>
+              <small>${escHtml(found.email)}</small>
+            </div>
+          </div>
+          ${alreadyLinked
+            ? `<button class="btn-unlink" onclick="unlinkUser('${found.uid}')">Putuskan</button>`
+            : `<button class="btn-link-user" onclick="linkUser('${found.uid}')">Hubungkan</button>`}
+        </div>`;
+    } catch (e) {
+      resultEl.innerHTML = `<div class="link-result-item error">Error: ${e.message}</div>`;
+    }
+  };
+
+  window.linkUser = async function(targetUid) {
+    await set(ref(db, `users/${currentUser.uid}/linkedUsers/${targetUid}`), true);
+    document.getElementById("link-email").value = "";
+    document.getElementById("link-result").innerHTML = "";
+    showToast("Pengguna berhasil dihubungkan! 🔗");
+  };
+
+  window.unlinkUser = async function(targetUid) {
+    await remove(ref(db, `users/${currentUser.uid}/linkedUsers/${targetUid}`));
+    document.getElementById("link-result").innerHTML = "";
+    showToast("Koneksi diputus.");
+  };
+
+  function renderLinkedUsersList() {
+    const container = document.getElementById("linked-users-list");
+    const keys = Object.keys(linkedUsersData);
+    if (!keys.length) {
+      container.innerHTML = `<p class="no-links">Belum ada pengguna yang dihubungkan.</p>`;
+      return;
+    }
+    container.innerHTML = keys.map((uid, i) => {
+      const u = linkedUsersData[uid];
+      const color = linkedUserColors[i % linkedUserColors.length];
+      return `
+        <div class="linked-user-chip">
+          <span class="linked-dot" style="background:${color}"></span>
+          <span class="linked-name">${escHtml(u.displayName || u.email)}</span>
+          <button onclick="unlinkUser('${uid}')" title="Putuskan">×</button>
+        </div>`;
+    }).join("");
+  }
+
+  const linkedUserColors = ["#7B8CDE","#F4A261","#2EC4B6","#E76F51","#A8DADC","#FFB4A2"];
+
+  // ===================== CALENDAR =====================
+  function renderCalendar() {
+    const year = calendarDate.getFullYear();
+    const month = calendarDate.getMonth();
+    const monthNames = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+    const dayNames = ["Min","Sen","Sel","Rab","Kam","Jum","Sab"];
+
+    document.getElementById("cal-month-label").textContent = `${monthNames[month]} ${year}`;
+
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const today = new Date().toISOString().split("T")[0];
+
+    // Build task map by date
+    const taskMap = {}; // date -> [{task, ownerName, color}]
+
+    allTasks.forEach(t => {
+      if (t.dueDate) {
+        if (!taskMap[t.dueDate]) taskMap[t.dueDate] = [];
+        taskMap[t.dueDate].push({ task: t, ownerName: "Saya", color: "#6C9EFF", isMine: true });
+      }
+    });
+
+    Object.keys(linkedUsersData).forEach((uid, i) => {
+      const u = linkedUsersData[uid];
+      const color = linkedUserColors[i % linkedUserColors.length];
+      (u.tasks || []).forEach(t => {
+        if (t.dueDate) {
+          if (!taskMap[t.dueDate]) taskMap[t.dueDate] = [];
+          taskMap[t.dueDate].push({ task: t, ownerName: u.displayName || u.email, color, isMine: false });
+        }
+      });
+    });
+
+    // Render days header
+    const headerEl = document.getElementById("cal-days-header");
+    headerEl.innerHTML = dayNames.map(d => `<div class="cal-day-name">${d}</div>`).join("");
+
+    // Render grid
+    const gridEl = document.getElementById("cal-grid");
+    let html = "";
+
+    // Empty cells before first day
+    for (let i = 0; i < firstDay; i++) {
+      html += `<div class="cal-cell empty"></div>`;
+    }
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+      const isToday = dateStr === today;
+      const events = taskMap[dateStr] || [];
+
+      html += `<div class="cal-cell ${isToday ? "today" : ""}" onclick="showDayDetail('${dateStr}')">
+        <span class="cal-date-num ${isToday ? "today-num" : ""}">${d}</span>
+        <div class="cal-events">`;
+      events.slice(0,3).forEach(ev => {
+        html += `<div class="cal-event-dot" style="background:${ev.color};border-left:3px solid ${ev.color}" title="${ev.ownerName}: ${ev.task.title}">
+          <span class="cal-event-name">${escHtml(ev.task.title)}</span>
+        </div>
+        <span class="cal-event-dot-mobile" style="background:${ev.color}"></span>`;
+      });
+      if (events.length > 3) {
+        html += `<div class="cal-more">+${events.length - 3}</div>`;
+      }
+      html += `</div></div>`;
+    }
+
+    gridEl.innerHTML = html;
+  }
+
+  window.prevMonth = function() {
+    calendarDate.setMonth(calendarDate.getMonth() - 1);
+    renderCalendar();
+  };
+  window.nextMonth = function() {
+    calendarDate.setMonth(calendarDate.getMonth() + 1);
+    renderCalendar();
+  };
+
+  window.showDayDetail = function(dateStr) {
+    const modal = document.getElementById("day-modal");
+    const titleEl = document.getElementById("day-modal-title");
+    const listEl = document.getElementById("day-modal-list");
+
+    const d = new Date(dateStr + "T00:00:00");
+    titleEl.textContent = d.toLocaleDateString("id-ID", { weekday:"long", day:"numeric", month:"long", year:"numeric" });
+
+    let allEventsDay = [];
+    allTasks.filter(t => t.dueDate === dateStr).forEach(t => {
+      allEventsDay.push({ task: t, ownerName: "Saya", color: "#6C9EFF", isMine: true });
+    });
+    Object.keys(linkedUsersData).forEach((uid, i) => {
+      const u = linkedUsersData[uid];
+      const color = linkedUserColors[i % linkedUserColors.length];
+      (u.tasks || []).filter(t => t.dueDate === dateStr).forEach(t => {
+        allEventsDay.push({ task: t, ownerName: u.displayName || u.email, color });
+      });
+    });
+
+    if (!allEventsDay.length) {
+      listEl.innerHTML = `<p class="modal-empty">Tidak ada tugas di hari ini.</p>`;
+    } else {
+      listEl.innerHTML = allEventsDay.map(ev => `
+        <div class="modal-task-item" style="border-left: 4px solid ${ev.color}">
+          <div class="modal-task-header">
+            <span class="modal-owner-tag" style="background:${ev.color}20;color:${ev.color}">${escHtml(ev.ownerName)}</span>
+            <span class="modal-priority" style="color:${priorityColors[ev.task.priority]}">${ev.task.priority}</span>
+          </div>
+          <strong class="${ev.task.completed ? "task-done-text" : ""}">${escHtml(ev.task.title)}</strong>
+          ${ev.task.description ? `<p>${escHtml(ev.task.description)}</p>` : ""}
+        </div>`).join("");
+    }
+    modal.style.display = "flex";
+  };
+
+  window.closeDayModal = function() {
+    document.getElementById("day-modal").style.display = "none";
+  };
+
+  // ===================== PAGE NAVIGATION =====================
+  window.showPage = function(page) {
+    currentPage = page;
+    document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+    document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".bottom-nav-btn").forEach(b => b.classList.remove("active"));
+    
+    document.getElementById(`page-${page}`).classList.add("active");
+    
+    const navBtn = document.getElementById(`nav-${page}`);
+    if (navBtn) navBtn.classList.add("active");
+    
+    const bNavBtn = document.getElementById(`bnav-${page}`);
+    if (bNavBtn) bNavBtn.classList.add("active");
+    
+    if (page === "calendar") renderCalendar();
+    window.scrollTo(0, 0);
+  };
+
+  // ===================== HELPERS =====================
+  function escHtml(str) {
+    if (!str) return "";
+    return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function firebaseErrMsg(code) {
+    const msgs = {
+      "auth/email-already-in-use": "Email sudah terdaftar.",
+      "auth/invalid-email": "Format email tidak valid.",
+      "auth/weak-password": "Password terlalu lemah (min 6 karakter).",
+      "auth/user-not-found": "Email tidak ditemukan.",
+      "auth/wrong-password": "Password salah.",
+      "auth/invalid-credential": "Email atau password salah.",
+      "auth/too-many-requests": "Terlalu banyak percobaan. Coba lagi nanti."
+    };
+    return msgs[code] || "Terjadi kesalahan. Coba lagi.";
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(() => t.classList.remove("show"), 2800);
+  }
+
+  // Toggle auth forms
+  window.showRegister = function() {
+    document.getElementById("login-form").style.display = "none";
+    document.getElementById("register-form").style.display = "flex";
+  };
+  window.showLogin = function() {
+    document.getElementById("register-form").style.display = "none";
+    document.getElementById("login-form").style.display = "flex";
+  };
+</script>
+
+<style>
+  :root {
+    --bg: #0D0F14;
+    --surface: #151820;
+    --surface2: #1C2030;
+    --border: #252A3A;
+    --accent: #6C9EFF;
+    --accent2: #A78BFA;
+    --text: #E8ECF5;
+    --muted: #7880A0;
+    --success: #5CDB95;
+    --danger: #FF5C5C;
+    --warning: #FFB347;
+    --radius: 14px;
+    --font-display: 'Syne', sans-serif;
+    --font-body: 'DM Sans', sans-serif;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    font-family: var(--font-body);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ============ AUTH SCREEN ============ */
+  #auth-screen {
+    display: flex;
+    min-height: 100vh;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(ellipse 80% 60% at 20% 0%, #1a2450 0%, transparent 60%),
+      radial-gradient(ellipse 60% 50% at 80% 100%, #1a1040 0%, transparent 60%),
+      var(--bg);
+    padding: 20px;
+  }
+
+  .auth-card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 44px 40px;
+    box-shadow: 0 32px 80px rgba(0,0,0,0.5);
+  }
+
+  .auth-logo {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    margin-bottom: 8px;
+  }
+  .auth-logo span { color: var(--accent); }
+
+  .auth-subtitle {
+    color: var(--muted);
+    font-size: 14px;
+    margin-bottom: 36px;
+    font-weight: 300;
+  }
+
+  .auth-form { display: flex; flex-direction: column; gap: 14px; }
+  .auth-form h3 { font-family: var(--font-display); font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+
+  .field-group { display: flex; flex-direction: column; gap: 6px; }
+  .field-group label { font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+  input[type="text"], input[type="email"], input[type="password"], input[type="date"],
+  select, textarea {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    width: 100%;
+  }
+  input:focus, select:focus, textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(108,158,255,0.12);
+  }
+  input[type="date"] { color-scheme: dark; }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 13px 20px;
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+    letter-spacing: 0.3px;
+  }
+  .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+  .btn-primary:disabled { opacity: 0.5; cursor: default; transform: none; }
+
+  .auth-switch {
+    text-align: center;
+    font-size: 14px;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+  .auth-switch a { color: var(--accent); cursor: pointer; text-decoration: none; font-weight: 500; }
+  .auth-switch a:hover { text-decoration: underline; }
+
+  .error-msg { color: var(--danger); font-size: 13px; min-height: 18px; }
+
+  .security-badge {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(92,219,149,0.08);
+    border: 1px solid rgba(92,219,149,0.2);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--success);
+    margin-top: 4px;
+  }
+
+  /* ============ APP SCREEN ============ */
+  #app-screen {
+    display: none;
+    flex-direction: row;
+    min-height: 100vh;
+  }
+
+  /* ---- SIDEBAR ---- */
+  .sidebar {
+    width: 240px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 28px 20px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+
+  .sidebar-logo {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    margin-bottom: 32px;
+    padding: 0 8px;
+  }
+  .sidebar-logo span { color: var(--accent); }
+
+  .nav-section { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 600; padding: 0 8px; margin-bottom: 8px; }
+
+  .nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 15px;
+    font-weight: 400;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    width: 100%;
+    text-align: left;
+    transition: background 0.15s, color 0.15s;
+    margin-bottom: 2px;
+  }
+  .nav-btn:hover { background: var(--surface2); color: var(--text); }
+  .nav-btn.active { background: rgba(108,158,255,0.15); color: var(--accent); font-weight: 500; }
+  .nav-icon { font-size: 18px; width: 22px; text-align: center; }
+
+  /* ---- BOTTOM NAV (Mobile Only) ---- */
+  .bottom-nav {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 64px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    z-index: 1000;
+    padding: 0 10px;
+    justify-content: space-around;
+    align-items: center;
+    box-shadow: 0 -10px 30px rgba(0,0,0,0.3);
+  }
+  .bottom-nav-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-family: var(--font-body);
+    font-size: 11px;
+    gap: 4px;
+    cursor: pointer;
+    flex: 1;
+    height: 100%;
+    transition: color 0.2s;
+  }
+  .bottom-nav-btn.active { color: var(--accent); }
+  .bottom-nav-icon { font-size: 20px; }
+
+  .sidebar-divider { height: 1px; background: var(--border); margin: 20px 0; }
+
+  .user-profile {
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    background: var(--surface2);
+    border-radius: 10px;
+  }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-family: var(--font-display); font-size: 14px;
+    flex-shrink: 0;
+  }
+  .user-info { flex: 1; overflow: hidden; }
+  .user-info strong { display: block; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .user-info small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+
+  .logout-btn {
+    background: none; border: none; cursor: pointer;
+    color: var(--muted); font-size: 18px; padding: 4px;
+    transition: color 0.15s;
+  }
+  .logout-btn:hover { color: var(--danger); }
+
+  /* ---- MAIN CONTENT ---- */
+  .main-content {
+    flex: 1;
+    overflow-y: auto;
+    background:
+      radial-gradient(ellipse 50% 40% at 100% 0%, rgba(108,158,255,0.05) 0%, transparent 60%),
+      var(--bg);
+    padding-bottom: 20px;
+  }
+
+  .page { display: none; padding: 40px; max-width: 900px; margin: 0 auto; }
+  .page.active { display: block; }
+
+  .page-header { margin-bottom: 32px; position: relative; }
+  .page-header h1 { font-family: var(--font-display); font-size: 32px; font-weight: 800; letter-spacing: -1px; }
+  .page-header p { color: var(--muted); margin-top: 6px; font-size: 15px; font-weight: 300; }
+
+  /* ============ TOGGLE PANEL BTN ============ */
+  .toggle-panel-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 18px;
+    border-radius: 12px;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+    margin-bottom: 16px;
+    transition: all 0.2s;
+    width: fit-content;
+  }
+  .toggle-panel-btn:hover { background: var(--surface); border-color: var(--accent); }
+  .toggle-panel-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+
+  /* ============ TASK FORM CARD ============ */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px;
+    margin-bottom: 24px;
+    overflow: hidden;
+  }
+  .card-title {
+    font-family: var(--font-display);
+    font-size: 16px; font-weight: 700;
+    margin-bottom: 20px;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .form-grid .span2 { grid-column: span 2; }
+
+  .form-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+
+  /* ---- TASK LIST ---- */
+  .list-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 16px; flex-wrap: wrap; gap: 10px;
+  }
+  .list-header h2 { font-family: var(--font-display); font-size: 18px; font-weight: 700; }
+  .task-count { font-size: 13px; color: var(--muted); }
+
+  .filter-group { display: flex; gap: 6px; }
+  .filter-btn {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 14px;
+    color: var(--muted); font-size: 13px; cursor: pointer;
+    font-family: var(--font-body);
+    transition: all 0.15s;
+  }
+  #filter-status {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px;
+    color: var(--text); font-size: 13px;
+    font-family: var(--font-body);
+  }
+
+  .task-card {
+    display: flex; align-items: flex-start; gap: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s, transform 0.1s;
+    position: relative;
+  }
+  .task-card:hover { border-color: rgba(108,158,255,0.3); background: var(--surface2); }
+  .task-card:active { transform: scale(0.99); }
+  .task-card.done { opacity: 0.5; }
+  .task-card.overdue { border-color: rgba(255,92,92,0.3); }
+
+  .task-check {
+    width: 22px; height: 22px; border-radius: 6px;
+    border: 2px solid var(--border);
+    flex-shrink: 0; margin-top: 2px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; color: #fff;
+    transition: all 0.15s;
+  }
+  .task-check.checked {
+    background: var(--success); border-color: var(--success);
+  }
+
+  .task-body { flex: 1; min-width: 0; }
+  .task-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .task-title { font-weight: 500; font-size: 15px; }
+  .task-card.done .task-title { text-decoration: line-through; }
+  .task-done-text { text-decoration: line-through; }
+
+  .priority-dot {
+    font-size: 10px; padding: 2px 8px; border-radius: 20px;
+    font-weight: 700; color: #000; letter-spacing: 0.5px;
+    flex-shrink: 0;
+  }
+  .task-desc-text { font-size: 13px; color: var(--muted); margin-top: 4px; font-weight: 300; }
+  .task-meta { margin-top: 6px; }
+  .task-date { font-size: 12px; color: var(--muted); }
+  .overdue-text { color: var(--danger) !important; font-weight: 500; }
+
+  .delete-btn {
+    background: none; border: none; color: var(--muted);
+    font-size: 22px; cursor: pointer; line-height: 1;
+    padding: 0 4px; flex-shrink: 0;
+    transition: color 0.15s;
+  }
+  .delete-btn:hover { color: var(--danger); }
+
+  .empty-state {
+    text-align: center; padding: 60px 20px;
+    color: var(--muted);
+  }
+  .empty-icon { font-size: 48px; margin-bottom: 16px; }
+  .empty-state p { font-size: 15px; line-height: 1.6; font-weight: 300; }
+
+  /* ============ CALENDAR ============ */
+  .cal-header {
+    display: flex; align-items: center; gap: 20px;
+    margin-bottom: 20px;
+  }
+  .cal-month-title {
+    font-family: var(--font-display);
+    font-size: 24px; font-weight: 800; letter-spacing: -0.5px;
+    flex: 1;
+  }
+  .cal-nav-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; width: 38px; height: 38px;
+    color: var(--text); font-size: 18px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  .cal-nav-btn:hover { background: var(--surface2); }
+
+  .cal-days-header {
+    display: grid; grid-template-columns: repeat(7, 1fr);
+    margin-bottom: 8px;
+  }
+  .cal-day-name {
+    text-align: center; font-size: 12px;
+    font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    padding: 8px 0;
+  }
+
+  #cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+  }
+
+  .cal-cell {
+    min-height: 90px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    overflow: hidden;
+  }
+  .cal-cell:hover { border-color: var(--accent); background: var(--surface2); }
+  .cal-cell.empty { background: transparent; border-color: transparent; cursor: default; }
+  .cal-cell.today { border-color: var(--accent); background: rgba(108,158,255,0.06); }
+
+  .cal-date-num {
+    display: inline-block;
+    font-family: var(--font-display);
+    font-size: 14px; font-weight: 700;
+    margin-bottom: 4px; color: var(--muted);
+  }
+  .cal-date-num.today-num {
+    background: var(--accent);
+    color: #fff; border-radius: 6px;
+    padding: 0 6px; color: #000; font-weight: 800;
+  }
+
+  .cal-events { display: flex; flex-direction: column; gap: 2px; }
+  .cal-event-dot {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+    font-weight: 400;
+  }
+  .cal-event-name { font-size: 11px; }
+  .cal-more { font-size: 10px; color: var(--muted); padding: 2px 6px; }
+
+  /* ============ LEGEND ============ */
+  .cal-legend {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    margin-bottom: 20px;
+  }
+  .legend-item {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; color: var(--muted);
+  }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  /* ============ LINK USERS ============ */
+  .link-search-row {
+    display: flex; gap: 10px; margin-bottom: 12px;
+  }
+  .link-search-row input { flex: 1; }
+  .btn-search {
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 10px; padding: 0 20px;
+    font-family: var(--font-display); font-weight: 700;
+    font-size: 14px; cursor: pointer;
+    transition: opacity 0.15s;
+    white-space: nowrap;
+  }
+  .btn-search:hover { opacity: 0.85; }
+
+  .link-result-item {
+    background: var(--surface2); border-radius: 10px;
+    padding: 14px 16px;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 14px;
+  }
+  .link-result-item.error { color: var(--danger); }
+  .link-result-item.searching { color: var(--muted); }
+  .link-user-info { display: flex; align-items: center; gap: 12px; }
+  .link-user-info strong { display: block; font-size: 15px; }
+  .link-user-info small { color: var(--muted); font-size: 12px; }
+  .link-avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent2), var(--accent));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 16px;
+  }
+  .btn-link-user {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff; border: none; border-radius: 8px;
+    padding: 8px 16px; font-family: var(--font-display);
+    font-weight: 700; font-size: 13px; cursor: pointer;
+  }
+  .btn-unlink {
+    background: var(--surface); color: var(--danger);
+    border: 1px solid var(--danger); border-radius: 8px;
+    padding: 8px 16px; font-family: var(--font-display);
+    font-weight: 700; font-size: 13px; cursor: pointer;
+  }
+
+  .linked-users-section { margin-bottom: 20px; }
+  .linked-users-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .linked-user-chip {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 20px; padding: 6px 14px;
+    font-size: 13px;
+  }
+  .linked-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .linked-user-chip button {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; padding: 0;
+    line-height: 1;
+  }
+  .linked-user-chip button:hover { color: var(--danger); }
+  .no-links { font-size: 14px; color: var(--muted); font-weight: 300; padding: 4px 0; }
+
+  /* ============ DAY MODAL ============ */
+  #day-modal {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(4px);
+    align-items: center; justify-content: center;
+    z-index: 1000; padding: 20px;
+  }
+  .modal-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 32px;
+    width: 100%; max-width: 480px;
+    max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 40px 100px rgba(0,0,0,0.5);
+  }
+  .modal-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    margin-bottom: 20px; gap: 16px;
+  }
+  .modal-header h3 {
+    font-family: var(--font-display); font-size: 20px; font-weight: 800;
+  }
+  .modal-close {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; width: 32px; height: 32px;
+    color: var(--muted); font-size: 20px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .modal-close:hover { color: var(--text); }
+  .modal-empty { color: var(--muted); font-size: 14px; font-weight: 300; }
+  .modal-task-item {
+    padding: 14px 16px; border-radius: 10px;
+    background: var(--surface2); margin-bottom: 10px;
+  }
+  .modal-task-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .modal-owner-tag {
+    font-size: 11px; font-weight: 700;
+    padding: 3px 10px; border-radius: 20px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .modal-priority { font-size: 11px; color: var(--muted); text-transform: capitalize; }
+  .modal-task-item strong { display: block; font-size: 15px; margin-bottom: 4px; }
+  .modal-task-item p { font-size: 13px; color: var(--muted); font-weight: 300; }
+
+  /* ============ TOAST ============ */
+  #toast {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--success);
+    border-radius: 12px;
+    padding: 14px 24px;
+    font-size: 14px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.4);
+    opacity: 0; transition: opacity 0.25s, transform 0.25s;
+    z-index: 2000; pointer-events: none;
+    white-space: nowrap;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ============ RESPONSIVE ============ */
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .bottom-nav { display: flex; }
+    .main-content { padding-bottom: 80px; }
+    .page { padding: 20px 16px; }
+    .page-header h1 { font-size: 26px; }
+    .page-header p { font-size: 13px; }
+
+    .form-grid { grid-template-columns: 1fr; }
+    .form-grid .span2 { grid-column: 1; }
+
+    .cal-cell { min-height: 54px; padding: 4px; }
+    .cal-date-num { font-size: 12px; margin-bottom: 2px; }
+    .cal-event-dot { display: none; }
+    .cal-events { flex-direction: row; flex-wrap: wrap; justify-content: center; }
+    .cal-event-dot-mobile { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); display: block; }
+
+    .card { padding: 20px; }
+    .task-card { padding: 12px 14px; }
+    .task-title { font-size: 14px; }
+    .task-desc-text { font-size: 12px; }
+
+    #toast { bottom: 80px; font-size: 13px; padding: 12px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== AUTH SCREEN ==================== -->
+<div id="auth-screen">
+  <div class="auth-card">
+    <div class="auth-logo">TASK<span>LY</span></div>
+    <p class="auth-subtitle">Kelola tugas Anda dengan cerdas & kolaboratif.</p>
+
+    <!-- LOGIN -->
+    <div id="login-form" class="auth-form">
+      <h3>Masuk</h3>
+      <div class="field-group">
+        <label>Email</label>
+        <input type="email" id="login-email" placeholder="nama@email.com" onkeydown="if(event.key==='Enter')loginUser()">
+      </div>
+      <div class="field-group">
+        <label>Password</label>
+        <input type="password" id="login-password" placeholder="••••••••" onkeydown="if(event.key==='Enter')loginUser()">
+      </div>
+      <p class="error-msg" id="login-error"></p>
+      <button class="btn-primary" id="login-btn" onclick="loginUser()">Masuk</button>
+      <p class="auth-switch">Belum punya akun? <a onclick="showRegister()">Daftar sekarang</a></p>
+    </div>
+
+    <!-- REGISTER -->
+    <div id="register-form" class="auth-form" style="display:none">
+      <h3>Buat Akun</h3>
+      <div class="field-group">
+        <label>Nama Lengkap</label>
+        <input type="text" id="reg-name" placeholder="Nama Anda">
+      </div>
+      <div class="field-group">
+        <label>Email</label>
+        <input type="email" id="reg-email" placeholder="nama@email.com">
+      </div>
+      <div class="field-group">
+        <label>Password</label>
+        <input type="password" id="reg-password" placeholder="Min. 6 karakter">
+      </div>
+      <div class="field-group">
+        <label>Konfirmasi Password</label>
+        <input type="password" id="reg-confirm" placeholder="Ulangi password">
+      </div>
+      <p class="error-msg" id="reg-error"></p>
+      <div class="security-badge">🔒 Password dienkripsi dengan SHA-256 + Firebase Auth sebelum disimpan</div>
+      <button class="btn-primary" id="reg-btn" onclick="registerUser()">Buat Akun</button>
+      <p class="auth-switch">Sudah punya akun? <a onclick="showLogin()">Masuk</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== APP SCREEN ==================== -->
+<div id="app-screen">
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="sidebar-logo">TASK<span>LY</span></div>
+
+    <div class="nav-section">Menu</div>
+    <button class="nav-btn active" id="nav-tasks" onclick="showPage('tasks')">
+      <span class="nav-icon">✓</span> <span>Tugas Saya</span>
+    </button>
+    <button class="nav-btn" id="nav-calendar" onclick="showPage('calendar')">
+      <span class="nav-icon">📅</span> <span>Kalender</span>
+    </button>
+
+    <div class="sidebar-divider"></div>
+
+    <div class="user-profile">
+      <div class="avatar" id="sidebar-avatar">U</div>
+      <div class="user-info">
+        <strong id="user-name-display">User</strong>
+        <small id="user-email-display">email@example.com</small>
+      </div>
+      <button class="logout-btn" onclick="logoutUser()" title="Keluar">⏻</button>
+    </div>
+  </div>
+
+  <!-- BOTTOM NAV (Mobile) -->
+  <div class="bottom-nav">
+    <button class="bottom-nav-btn active" id="bnav-tasks" onclick="showPage('tasks')">
+      <span class="bottom-nav-icon">✓</span>
+      <span>Tugas</span>
+    </button>
+    <button class="bottom-nav-btn" id="bnav-calendar" onclick="showPage('calendar')">
+      <span class="bottom-nav-icon">📅</span>
+      <span>Kalender</span>
+    </button>
+    <button class="bottom-nav-btn" onclick="logoutUser()">
+      <span class="bottom-nav-icon">⏻</span>
+      <span>Keluar</span>
+    </button>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main-content">
+
+    <!-- ===== PAGE: TASKS ===== -->
+    <div class="page active" id="page-tasks">
+      <div class="page-header">
+        <h1>Tugas Saya</h1>
+        <p>Tambah, kelola, dan pantau semua tugas Anda.</p>
+      </div>
+
+      <!-- Add Task Toggle Button -->
+      <button class="toggle-panel-btn" id="toggle-add-task-btn" onclick="toggleAddTaskForm()">
+        ➕ Tambah Tugas
+      </button>
+
+      <!-- Add Task Card -->
+      <div class="card" id="add-task-container" style="display: none;">
+        <div class="card-title">📝 Detail Tugas Baru</div>
+        <div class="form-grid">
+          <div class="field-group span2">
+            <label>Judul Tugas *</label>
+            <input type="text" id="task-title" placeholder="Contoh: Kerjakan laporan bulanan">
+          </div>
+          <div class="field-group span2">
+            <label>Deskripsi</label>
+            <textarea id="task-desc" placeholder="Detail tugas (opsional)" rows="2" style="resize:vertical"></textarea>
+          </div>
+          <div class="field-group">
+            <label>Tanggal Deadline *</label>
+            <input type="date" id="task-date">
+          </div>
+          <div class="field-group">
+            <label>Prioritas</label>
+            <select id="task-priority">
+              <option value="high">🔴 Tinggi</option>
+              <option value="medium" selected>🟡 Sedang</option>
+              <option value="low">🟢 Rendah</option>
+            </select>
+          </div>
+        </div>
+        <p class="error-msg" id="task-error" style="margin-top:10px"></p>
+        <div class="form-actions">
+          <button class="btn-primary" id="add-task-btn" onclick="addTask()">Simpan Tugas</button>
+        </div>
+      </div>
+
+      <!-- Task List -->
+      <div class="list-header">
+        <h2>Daftar Tugas <span class="task-count" id="task-count"></span></h2>
+        <select id="filter-status" onchange="filterTasks()">
+          <option value="all">Semua Status</option>
+          <option value="active">Belum Selesai</option>
+          <option value="done">Selesai</option>
+        </select>
+      </div>
+      <div id="task-list-container"></div>
+    </div>
+
+    <!-- ===== PAGE: CALENDAR ===== -->
+    <div class="page" id="page-calendar">
+      <div class="page-header">
+        <h1>Kalender</h1>
+        <p>Lihat tugas Anda dan tugas kolaborator dalam satu kalender.</p>
+      </div>
+
+      <!-- Connect User Toggle Button -->
+      <button class="toggle-panel-btn" id="toggle-connect-btn" onclick="toggleConnectForm()">
+        🔗 Hubungkan Pengguna
+      </button>
+
+      <!-- Link Users -->
+      <div class="card" id="connect-user-container" style="display: none;">
+        <div class="card-title">🔍 Cari Pengguna</div>
+        <p style="font-size:14px;color:var(--muted);margin-bottom:16px;font-weight:300">Hubungkan email untuk melihat tugas mereka di kalender ini.</p>
+        <div class="link-search-row">
+          <input type="email" id="link-email" placeholder="Masukkan email pengguna..." onkeydown="if(event.key==='Enter')searchUserToLink()">
+          <button class="btn-search" onclick="searchUserToLink()">Cari</button>
+        </div>
+        <div id="link-result"></div>
+
+        <div class="linked-users-section" style="margin-top:20px">
+          <div style="font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Terhubung</div>
+          <div class="linked-users-chips" id="linked-users-list">
+            <p class="no-links">Belum ada pengguna yang dihubungkan.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div class="cal-legend" id="cal-legend">
+        <div class="legend-item">
+          <div class="legend-dot" style="background:#6C9EFF"></div>
+          <span>Tugas Saya</span>
+        </div>
+      </div>
+
+      <!-- Calendar -->
+      <div class="card" style="padding:24px">
+        <div class="cal-header">
+          <button class="cal-nav-btn" onclick="prevMonth()">‹</button>
+          <span class="cal-month-title" id="cal-month-label">-</span>
+          <button class="cal-nav-btn" onclick="nextMonth()">›</button>
+        </div>
+        <div class="cal-days-header" id="cal-days-header"></div>
+        <div id="cal-grid"></div>
+      </div>
+    </div>
+
+  </div><!-- /main-content -->
+</div><!-- /app-screen -->
+
+<!-- ==================== DAY MODAL ==================== -->
+<div id="day-modal" onclick="if(event.target===this)closeDayModal()">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3 id="day-modal-title">-</h3>
+      <button class="modal-close" onclick="closeDayModal()">×</button>
+    </div>
+    <div id="day-modal-list"></div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- Update sidebar avatar on load -->
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const today = new Date().toISOString().split("T")[0];
+    document.getElementById("task-date").value = today;
+  });
+
+  // Update avatar letter when user info is set
+  const observer = new MutationObserver(() => {
+    const name = document.getElementById("user-name-display").textContent;
+    if (name && name !== "User") {
+      document.getElementById("sidebar-avatar").textContent = name[0].toUpperCase();
+    }
+  });
+  observer.observe(document.getElementById("user-name-display"), { childList: true });
+</script>
+
+</body>
+</html>
