@@ -1288,6 +1288,35 @@
 
     .edit-modal-card { padding: 24px 20px; }
     #toast { bottom: 72px; }
+
+
+    .cal-cell { 
+    min-height: 65px; /* Sedikit lebih tinggi agar muat titik */
+    padding: 4px; 
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .cal-events { 
+    flex-direction: row; 
+    flex-wrap: wrap; 
+    justify-content: center; 
+    gap: 2px; /* Jarak antar titik tugas */
+    margin-top: 4px;
+  }
+
+  /* Pastikan titik ini terlihat! */
+  .cal-event-dot-mobile { 
+    width: 6px; 
+    height: 6px; 
+    border-radius: 50%; 
+    display: block !important; /* Paksa tampil */
+    box-shadow: 0 0 2px rgba(0,0,0,0.5);
+  }
+
+  /* Sembunyikan teks nama tugas di HP agar tidak meluber */
+  .cal-event-dot { display: none !important; } 
   }
 </style>
 </head>
