@@ -142,7 +142,11 @@
     }
   };
 
-  window.logoutUser = async function() { await signOut(auth); };
+  window.logoutUser = async function() { 
+    if (confirm("Apakah Anda yakin ingin keluar?")) {
+      await signOut(auth); 
+    }
+  };
 
   // ===================== TASKS CRUD =====================
   function loadTasks() {
@@ -175,7 +179,7 @@
       document.getElementById("task-date").value = new Date().toISOString().split("T")[0];
       document.getElementById("task-priority").value = "medium";
       showToast("Tugas ditambahkan ✓");
-      toggleAddTaskForm();
+      closeAddTaskModal();
     } catch (e) {
       errEl.textContent = "Gagal menyimpan: " + e.message;
     }
@@ -209,6 +213,21 @@
 
   window.closeEditModal = function() {
     document.getElementById("edit-modal").style.display = "none";
+  };
+
+  // New Modal Functions
+  window.openAddTaskModal = function() {
+    document.getElementById("add-task-modal").style.display = "flex";
+    document.getElementById("task-title").focus();
+  };
+  window.closeAddTaskModal = function() {
+    document.getElementById("add-task-modal").style.display = "none";
+  };
+  window.openConnectModal = function() {
+    document.getElementById("connect-modal").style.display = "flex";
+  };
+  window.closeConnectModal = function() {
+    document.getElementById("connect-modal").style.display = "none";
   };
 
   window.saveEditTask = async function() {
@@ -254,40 +273,20 @@
   }
 
   function sortTasks(tasks) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
     return [...tasks].sort((a, b) => {
-      // Completed always last
+      // 1. Status Selesai (Belum selesai di atas)
       if (a.completed !== b.completed) return a.completed ? 1 : -1;
 
-      if (a.completed) return 0; // both completed, keep order
+      // 2. Tanggal Terdekat (Ascending)
+      if (a.dueDate !== b.dueDate) {
+        if (!a.dueDate) return 1;
+        if (!b.dueDate) return -1;
+        return a.dueDate.localeCompare(b.dueDate);
+      }
 
-      const daysA = getDaysLeft(a.dueDate);
-      const daysB = getDaysLeft(b.dueDate);
-
-      // Overdue first (most overdue first)
-      const isOverdueA = daysA !== null && daysA < 0;
-      const isOverdueB = daysB !== null && daysB < 0;
-      if (isOverdueA !== isOverdueB) return isOverdueA ? -1 : 1;
-      if (isOverdueA && isOverdueB) return daysA - daysB; // more overdue first
-
-      // Then sort by composite urgency score
-      const urgencyScore = (task, days) => {
-        const pScore = priorityScore[task.priority] || 1;
-        if (days === null) return pScore;
-        // Closer deadline + higher priority = higher score
-        const deadline_weight = days <= 3 ? (10 - days) * 2 : Math.max(0, 20 - days);
-        return deadline_weight + pScore * 3;
-      };
-
-      const sA = urgencyScore(a, daysA);
-      const sB = urgencyScore(b, daysB);
-      if (sB !== sA) return sB - sA;
-
-      // Tiebreak by priority
-      const pA = priorityScore[a.priority] || 1;
-      const pB = priorityScore[b.priority] || 1;
+      // 3. Prioritas (High > Medium > Low)
+      const pA = priorityScore[a.priority] || 0;
+      const pB = priorityScore[b.priority] || 0;
       return pB - pA;
     });
   }
@@ -381,9 +380,11 @@
 
   window.filterTasks = renderTaskList;
 
-  // ===================== LINKED USERS =====================
+  // ===================== LINKED USERS & NOTIFICATIONS =====================
   async function loadLinkedUsers() {
     if (!currentUser) return;
+    
+    // Listen for linked users
     const linksRef = ref(db, `users/${currentUser.uid}/linkedUsers`);
     onValue(linksRef, async (snapshot) => {
       linkedUsersData = {};
@@ -401,7 +402,67 @@
       renderLinkedUsersList();
       renderCalendar();
     });
+
+    // Listen for incoming connection requests
+    const requestsRef = ref(db, `connectionRequests/${currentUser.uid}`);
+    onValue(requestsRef, (snapshot) => {
+      const requests = [];
+      snapshot.forEach(child => {
+        requests.push({ fromUid: child.key, ...child.val() });
+      });
+      renderNotifications(requests);
+    });
   }
+
+  function renderNotifications(requests) {
+    const container = document.getElementById("notif-list");
+    const countEl = document.getElementById("notif-count");
+    
+    if (countEl) {
+      countEl.textContent = requests.length;
+      countEl.style.display = requests.length > 0 ? "flex" : "none";
+    }
+
+    if (!requests.length) {
+      container.innerHTML = `<p class="no-notif">Tidak ada notifikasi baru.</p>`;
+      return;
+    }
+
+    container.innerHTML = requests.map(req => `
+      <div class="notif-item">
+        <div class="notif-content">
+          <strong>${escHtml(req.senderName)}</strong> ingin terhubung dengan Anda.
+        </div>
+        <div class="notif-actions">
+          <button class="btn-notif-accept" onclick="acceptRequest('${req.fromUid}', '${req.senderName}')">Terima</button>
+          <button class="btn-notif-decline" onclick="declineRequest('${req.fromUid}')">Tolak</button>
+        </div>
+      </div>
+    `).join("");
+  }
+
+  window.acceptRequest = async function(fromUid, senderName) {
+    try {
+      // Add to current user's linkedUsers
+      await set(ref(db, `users/${currentUser.uid}/linkedUsers/${fromUid}`), true);
+      // Add to sender's linkedUsers (bi-directional)
+      await set(ref(db, `users/${fromUid}/linkedUsers/${currentUser.uid}`), true);
+      // Remove the request
+      await remove(ref(db, `connectionRequests/${currentUser.uid}/${fromUid}`));
+      showToast(`Sekarang terhubung dengan ${senderName}! 🤝`);
+    } catch (e) {
+      showToast("Gagal menerima permintaan.");
+    }
+  };
+
+  window.declineRequest = async function(fromUid) {
+    try {
+      await remove(ref(db, `connectionRequests/${currentUser.uid}/${fromUid}`));
+      showToast("Permintaan ditolak.");
+    } catch (e) {
+      showToast("Gagal menolak permintaan.");
+    }
+  };
 
   window.searchUserToLink = async function() {
     const email = document.getElementById("link-email").value.trim().toLowerCase();
@@ -420,7 +481,13 @@
         if (child.val().email?.toLowerCase() === email) found = { uid: child.key, ...child.val() };
       });
       if (!found) { resultEl.innerHTML = `<div class="link-result-item error">Pengguna tidak ditemukan.</div>`; return; }
+      
       const alreadyLinked = linkedUsersData[found.uid];
+      
+      // Check if request already sent
+      const reqSnap = await get(ref(db, `connectionRequests/${found.uid}/${currentUser.uid}`));
+      const isPending = reqSnap.exists();
+
       resultEl.innerHTML = `
         <div class="link-result-item">
           <div class="link-user-info">
@@ -432,21 +499,33 @@
           </div>
           ${alreadyLinked
             ? `<button class="btn-unlink" onclick="unlinkUser('${found.uid}')">Putuskan</button>`
-            : `<button class="btn-link-user" onclick="linkUser('${found.uid}')">Hubungkan</button>`}
+            : (isPending 
+                ? `<button class="btn-secondary" disabled>Menunggu...</button>`
+                : `<button class="btn-link-user" onclick="sendConnectionRequest('${found.uid}', '${escHtml(found.displayName)}')">Hubungkan</button>`)
+          }
         </div>`;
     } catch (e) { resultEl.innerHTML = `<div class="link-result-item error">Error: ${e.message}</div>`; }
   };
 
-  window.linkUser = async function(targetUid) {
-    await set(ref(db, `users/${currentUser.uid}/linkedUsers/${targetUid}`), true);
-    document.getElementById("link-email").value = "";
-    document.getElementById("link-result").innerHTML = "";
-    showToast("Pengguna berhasil dihubungkan! 🔗");
+  window.sendConnectionRequest = async function(targetUid, targetName) {
+    try {
+      const senderName = currentUser.displayName || currentUser.email.split("@")[0];
+      await set(ref(db, `connectionRequests/${targetUid}/${currentUser.uid}`), {
+        senderName: senderName,
+        senderEmail: currentUser.email,
+        timestamp: Date.now()
+      });
+      showToast(`Permintaan dikirim ke ${targetName} ✉️`);
+      searchUserToLink(); // Refresh search result
+    } catch (e) {
+      showToast("Gagal mengirim permintaan.");
+    }
   };
 
   window.unlinkUser = async function(targetUid) {
+    if (!confirm("Putuskan koneksi dengan pengguna ini?")) return;
     await remove(ref(db, `users/${currentUser.uid}/linkedUsers/${targetUid}`));
-    document.getElementById("link-result").innerHTML = "";
+    await remove(ref(db, `users/${targetUid}/linkedUsers/${currentUser.uid}`)); // Bi-directional
     showToast("Koneksi diputus.");
   };
 
@@ -464,6 +543,12 @@
       </div>`;
     }).join("");
   }
+
+  window.toggleNotifPanel = function() {
+    const panel = document.getElementById("notif-panel");
+    panel.style.display = panel.style.display === "none" ? "block" : "none";
+  };
+
 
   const linkedUserColors = ["#7B8CDE","#F4A261","#2EC4B6","#E76F51","#A8DADC","#FFB4A2"];
 
@@ -511,12 +596,25 @@
       html += `<div class="cal-cell ${isToday ? "today" : ""}" onclick="showDayDetail('${dateStr}')">
         <span class="cal-date-num ${isToday ? "today-num" : ""}">${d}</span>
         <div class="cal-events">`;
+      
+      // Desktop view (dots with names)
       events.slice(0,3).forEach(ev => {
-        html += `<div class="cal-event-dot" style="background:rgba(255,255,255,0.05);border-left:3px solid ${ev.color}" title="${ev.ownerName}: ${ev.task.title}">
+        html += `<div class="cal-event-dot desktop-only" style="background:rgba(255,255,255,0.05);border-left:3px solid ${ev.color}" title="${ev.ownerName}: ${ev.task.title}">
           <span class="cal-event-name">${escHtml(ev.task.title)}</span>
         </div>`;
       });
-      if (events.length > 3) html += `<div class="cal-more">+${events.length - 3} lagi</div>`;
+
+      // Mobile view (just dots)
+      if (events.length > 0) {
+        html += `<div class="mobile-dots-container">`;
+        events.slice(0, 4).forEach(ev => {
+          html += `<span class="mobile-event-dot" style="background:${ev.color}"></span>`;
+        });
+        if (events.length > 4) html += `<span class="mobile-event-more">...</span>`;
+        html += `</div>`;
+      }
+
+      if (events.length > 3) html += `<div class="cal-more desktop-only">+${events.length - 3} lagi</div>`;
       html += `</div></div>`;
     }
     gridEl.innerHTML = html;
@@ -1265,6 +1363,85 @@
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+  /* ============ MODAL SYSTEM ============ */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);
+    align-items: center; justify-content: center;
+    z-index: 1200; padding: 20px;
+  }
+  .modal-card-custom {
+    background: var(--surface); border: 1px solid var(--border2);
+    border-radius: 20px; width: 100%; max-width: 520px;
+    box-shadow: 0 50px 100px rgba(0,0,0,0.6);
+    animation: modalIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+  }
+  .modal-header-custom {
+    padding: 24px 28px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .modal-header-custom h3 { font-family: var(--font-display); font-size: 19px; font-weight: 800; }
+  .modal-body-custom { padding: 24px 28px; }
+  .modal-footer-custom {
+    padding: 18px 28px; background: var(--surface2);
+    display: flex; justify-content: flex-end; gap: 12px;
+  }
+
+  /* ============ NOTIFICATIONS ============ */
+  .notif-wrapper { position: relative; }
+  .notif-toggle-btn {
+    background: var(--surface2); border: 1px solid var(--border);
+    width: 42px; height: 42px; border-radius: 12px;
+    color: var(--text2); cursor: pointer; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s;
+  }
+  .notif-toggle-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .notif-badge {
+    position: absolute; top: -5px; right: -5px;
+    background: var(--danger); color: #fff;
+    min-width: 18px; height: 18px; border-radius: 10px;
+    font-size: 10px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px solid var(--bg);
+  }
+  .notif-panel {
+    position: absolute; top: 52px; right: 0;
+    width: 300px; background: var(--surface);
+    border: 1px solid var(--border2); border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    z-index: 1100; overflow: hidden;
+    animation: panelIn 0.2s ease;
+  }
+  @keyframes panelIn { from { opacity:0; transform: translateY(10px); } to { opacity:1; transform: translateY(0); } }
+  .notif-header { padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 700; color: var(--text2); }
+  .notif-item { padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface2); }
+  .notif-item:last-child { border-bottom: none; }
+  .notif-content { font-size: 13px; color: var(--text); line-height: 1.4; margin-bottom: 10px; }
+  .notif-actions { display: flex; gap: 8px; }
+  .btn-notif-accept {
+    flex: 1; background: var(--success); color: #000;
+    border: none; border-radius: 6px; padding: 6px;
+    font-size: 11px; font-weight: 700; cursor: pointer;
+  }
+  .btn-notif-decline {
+    flex: 1; background: var(--surface); color: var(--text2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px;
+    font-size: 11px; font-weight: 700; cursor: pointer;
+  }
+  .no-notif { padding: 24px; text-align: center; font-size: 13px; color: var(--muted); }
+
+  /* ============ CALENDAR DOTS (MOBILE) ============ */
+  .desktop-only { display: block; }
+  .mobile-dots-container { display: none; }
+  .mobile-event-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    display: inline-block; margin: 1px;
+    box-shadow: 0 0 2px rgba(0,0,0,0.5);
+  }
+  .mobile-event-more { font-size: 10px; color: var(--muted); line-height: 1; }
+
   /* ============ RESPONSIVE ============ */
   @media (max-width: 768px) {
     .sidebar { display: none; }
@@ -1278,47 +1455,40 @@
     .modal-form-grid { grid-template-columns: 1fr; }
     .modal-form-grid .span2 { grid-column: 1; }
 
-    .cal-cell { min-height: 52px; padding: 4px; }
-    .cal-date-num { font-size: 11px; }
-    .cal-event-dot { display: none; }
+    /* Calendar Mobile Enhancements */
+    .cal-cell { 
+      min-height: 65px; 
+      padding: 4px; 
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .cal-date-num { font-size: 12px; margin-bottom: 2px; }
+    .cal-date-num.today-num { padding: 0 4px; }
+    
+    .desktop-only { display: none !important; }
+    .mobile-dots-container { 
+      display: flex; 
+      flex-wrap: wrap; 
+      justify-content: center; 
+      gap: 2px; 
+      margin-top: 2px;
+      max-width: 100%;
+    }
 
     .card { padding: 18px; }
     .task-card { padding: 12px 14px; }
     .task-title-text { font-size: 13px; }
 
-    .edit-modal-card { padding: 24px 20px; }
+    .modal-card-custom { max-width: 100%; border-radius: 24px 24px 0 0; position: fixed; bottom: 0; animation: modalMobileIn 0.3s ease; }
+    @keyframes modalMobileIn { from { transform: translateY(100%); } to { transform: translateY(0); } }
+    
+    .notif-panel { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100%; border-radius: 0; height: 100vh; }
+
     #toast { bottom: 72px; }
-
-
-    .cal-cell { 
-    min-height: 65px; /* Sedikit lebih tinggi agar muat titik */
-    padding: 4px; 
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-
-  .cal-events { 
-    flex-direction: row; 
-    flex-wrap: wrap; 
-    justify-content: center; 
-    gap: 2px; /* Jarak antar titik tugas */
-    margin-top: 4px;
-  }
-
-  /* Pastikan titik ini terlihat! */
-  .cal-event-dot-mobile { 
-    width: 6px; 
-    height: 6px; 
-    border-radius: 50%; 
-    display: block !important; /* Paksa tampil */
-    box-shadow: 0 0 2px rgba(0,0,0,0.5);
-  }
-
-  /* Sembunyikan teks nama tugas di HP agar tidak meluber */
-  .cal-event-dot { display: none !important; } 
   }
 </style>
+
 </head>
 <body>
 
@@ -1417,49 +1587,30 @@
     <!-- ===== PAGE: TASKS ===== -->
     <div class="page active" id="page-tasks">
       <div class="page-header">
-        <h1>Tugas Saya</h1>
-        <p>Tugas diurutkan otomatis berdasarkan urgensi dan deadline.</p>
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <h1>Tugas Saya</h1>
+            <p>Tugas diurutkan otomatis berdasarkan deadline dan prioritas.</p>
+          </div>
+          <div class="notif-wrapper">
+            <button class="notif-toggle-btn" onclick="toggleNotifPanel()" title="Notifikasi">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+              <span class="notif-badge" id="notif-count" style="display: none;">0</span>
+            </button>
+            <div class="notif-panel" id="notif-panel" style="display: none;">
+              <div class="notif-header">Permintaan Koneksi</div>
+              <div id="notif-list">
+                <p class="no-notif">Tidak ada notifikasi baru.</p>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <button class="toggle-panel-btn" id="toggle-add-task-btn" onclick="toggleAddTaskForm()">
+      <button class="toggle-panel-btn" onclick="openAddTaskModal()">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1V13M1 7H13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         Tambah Tugas
       </button>
-
-      <!-- Add Task Card -->
-      <div class="card" id="add-task-container" style="display: none;">
-        <div class="card-title">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="1" width="12" height="14" rx="2" stroke="currentColor" stroke-width="1.4"/><path d="M5 5.5h6M5 8.5h6M5 11.5h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-          Tugas Baru
-        </div>
-        <div class="form-grid">
-          <div class="field-group span2">
-            <label>Judul Tugas *</label>
-            <input type="text" id="task-title" placeholder="Contoh: Kerjakan laporan bulanan" onkeydown="if(event.key==='Enter')addTask()">
-          </div>
-          <div class="field-group span2">
-            <label>Deskripsi</label>
-            <textarea id="task-desc" placeholder="Detail tugas (opsional)" rows="2" style="resize:vertical"></textarea>
-          </div>
-          <div class="field-group">
-            <label>Deadline *</label>
-            <input type="date" id="task-date">
-          </div>
-          <div class="field-group">
-            <label>Prioritas</label>
-            <select id="task-priority">
-              <option value="high">🔴 Tinggi</option>
-              <option value="medium" selected>🟡 Sedang</option>
-              <option value="low">🟢 Rendah</option>
-            </select>
-          </div>
-        </div>
-        <p class="error-msg" id="task-error" style="margin-top:10px"></p>
-        <div class="form-actions">
-          <button class="btn-secondary" onclick="toggleAddTaskForm()">Batal</button>
-          <button class="btn-primary" id="add-task-btn" onclick="addTask()">Simpan Tugas</button>
-        </div>
-      </div>
 
       <!-- Task List -->
       <div class="list-header">
@@ -1480,25 +1631,9 @@
         <p>Lihat tugas Anda dan tugas kolaborator dalam satu kalender.</p>
       </div>
 
-      <button class="toggle-panel-btn" id="toggle-connect-btn" onclick="toggleConnectForm()">
+      <button class="toggle-panel-btn" onclick="openConnectModal()">
         🔗 Hubungkan Pengguna
       </button>
-
-      <div class="card" id="connect-user-container" style="display: none;">
-        <div class="card-title">🔍 Cari Pengguna</div>
-        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;font-weight:300">Hubungkan email untuk melihat tugas mereka di kalender ini.</p>
-        <div class="link-search-row">
-          <input type="email" id="link-email" placeholder="Masukkan email pengguna..." onkeydown="if(event.key==='Enter')searchUserToLink()">
-          <button class="btn-search" onclick="searchUserToLink()">Cari</button>
-        </div>
-        <div id="link-result"></div>
-        <div style="margin-top:18px">
-          <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px">Terhubung</div>
-          <div class="linked-users-chips" id="linked-users-list">
-            <p class="no-links">Belum ada pengguna yang dihubungkan.</p>
-          </div>
-        </div>
-      </div>
 
       <div class="cal-legend" id="cal-legend">
         <div class="legend-item">
@@ -1521,43 +1656,109 @@
   </div>
 </div>
 
+<!-- ==================== ADD TASK MODAL ==================== -->
+<div id="add-task-modal" class="modal-overlay" onclick="if(event.target===this)closeAddTaskModal()">
+  <div class="modal-card-custom">
+    <div class="modal-header-custom">
+      <h3>✨ Tambah Tugas Baru</h3>
+      <button class="modal-close-btn" onclick="closeAddTaskModal()">×</button>
+    </div>
+    <div class="modal-body-custom">
+      <div class="form-grid">
+        <div class="field-group span2">
+          <label>Judul Tugas *</label>
+          <input type="text" id="task-title" placeholder="Contoh: Kerjakan laporan bulanan" onkeydown="if(event.key==='Enter')addTask()">
+        </div>
+        <div class="field-group span2">
+          <label>Deskripsi</label>
+          <textarea id="task-desc" placeholder="Detail tugas (opsional)" rows="2" style="resize:vertical"></textarea>
+        </div>
+        <div class="field-group">
+          <label>Deadline *</label>
+          <input type="date" id="task-date">
+        </div>
+        <div class="field-group">
+          <label>Prioritas</label>
+          <select id="task-priority">
+            <option value="high">🔴 Tinggi</option>
+            <option value="medium" selected>🟡 Sedang</option>
+            <option value="low">🟢 Rendah</option>
+          </select>
+        </div>
+      </div>
+      <p class="error-msg" id="task-error" style="margin-top:10px"></p>
+    </div>
+    <div class="modal-footer-custom">
+      <button class="btn-secondary" onclick="closeAddTaskModal()">Batal</button>
+      <button class="btn-primary" id="add-task-btn" onclick="addTask()">Simpan Tugas</button>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== CONNECT USER MODAL ==================== -->
+<div id="connect-modal" class="modal-overlay" onclick="if(event.target===this)closeConnectModal()">
+  <div class="modal-card-custom">
+    <div class="modal-header-custom">
+      <h3>🔗 Hubungkan Pengguna</h3>
+      <button class="modal-close-btn" onclick="closeConnectModal()">×</button>
+    </div>
+    <div class="modal-body-custom">
+      <p style="font-size:13px;color:var(--muted);margin-bottom:16px;font-weight:300">Kirim permintaan untuk melihat tugas mereka di kalender ini.</p>
+      <div class="link-search-row">
+        <input type="email" id="link-email" placeholder="Masukkan email pengguna..." onkeydown="if(event.key==='Enter')searchUserToLink()">
+        <button class="btn-search" onclick="searchUserToLink()">Cari</button>
+      </div>
+      <div id="link-result"></div>
+      <div style="margin-top:18px">
+        <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px">Sudah Terhubung</div>
+        <div class="linked-users-chips" id="linked-users-list">
+          <p class="no-links">Belum ada pengguna yang dihubungkan.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ==================== EDIT MODAL ==================== -->
-<div id="edit-modal" onclick="if(event.target===this)closeEditModal()">
-  <div class="edit-modal-card">
-    <div class="edit-modal-header">
+<div id="edit-modal" class="modal-overlay" onclick="if(event.target===this)closeEditModal()">
+  <div class="modal-card-custom">
+    <div class="modal-header-custom">
       <h3>✏️ Edit Tugas</h3>
       <button class="modal-close-btn" onclick="closeEditModal()">×</button>
     </div>
     <input type="hidden" id="edit-task-id">
-    <div class="modal-form-grid">
-      <div class="field-group span2">
-        <label>Judul Tugas *</label>
-        <input type="text" id="edit-task-title" placeholder="Judul tugas" onkeydown="if(event.key==='Enter')saveEditTask()">
+    <div class="modal-body-custom">
+      <div class="modal-form-grid">
+        <div class="field-group span2">
+          <label>Judul Tugas *</label>
+          <input type="text" id="edit-task-title" placeholder="Judul tugas" onkeydown="if(event.key==='Enter')saveEditTask()">
+        </div>
+        <div class="field-group span2">
+          <label>Deskripsi</label>
+          <textarea id="edit-task-desc" placeholder="Detail tugas (opsional)" rows="3" style="resize:vertical"></textarea>
+        </div>
+        <div class="field-group">
+          <label>Deadline *</label>
+          <input type="date" id="edit-task-date">
+        </div>
+        <div class="field-group">
+          <label>Prioritas</label>
+          <select id="edit-task-priority">
+            <option value="high">🔴 Tinggi</option>
+            <option value="medium">🟡 Sedang</option>
+            <option value="low">🟢 Rendah</option>
+          </select>
+        </div>
       </div>
-      <div class="field-group span2">
-        <label>Deskripsi</label>
-        <textarea id="edit-task-desc" placeholder="Detail tugas (opsional)" rows="3" style="resize:vertical"></textarea>
-      </div>
-      <div class="field-group">
-        <label>Deadline *</label>
-        <input type="date" id="edit-task-date">
-      </div>
-      <div class="field-group">
-        <label>Prioritas</label>
-        <select id="edit-task-priority">
-          <option value="high">🔴 Tinggi</option>
-          <option value="medium">🟡 Sedang</option>
-          <option value="low">🟢 Rendah</option>
-        </select>
-      </div>
+      <p class="error-msg" id="edit-task-error" style="margin-top:10px"></p>
     </div>
-    <p class="error-msg" id="edit-task-error" style="margin-top:10px"></p>
-    <div class="modal-form-actions">
+    <div class="modal-footer-custom">
       <button class="btn-secondary" onclick="closeEditModal()">Batal</button>
       <button class="btn-primary" id="save-edit-btn" onclick="saveEditTask()">Simpan Perubahan</button>
     </div>
   </div>
 </div>
+
 
 <!-- ==================== DAY MODAL ==================== -->
 <div id="day-modal" onclick="if(event.target===this)closeDayModal()">
