@@ -685,6 +685,7 @@
     if (!str) return "";
     return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   }
+  // Shortcut Keyboard untuk Kalender (Panah Kiri, Panah Kanan, dan tombol T)
 
   function firebaseErrMsg(code) {
     const msgs = {
@@ -714,6 +715,26 @@
     document.getElementById("register-form").style.display = "none";
     document.getElementById("login-form").style.display = "flex";
   };
+
+  document.addEventListener('keydown', (e) => {
+  // Hanya jalankan jika user sedang berada di halaman kalender
+  if (currentPage !== 'calendar') return;
+  
+  // Jangan jalankan jika user sedang mengetik di dalam input atau textarea
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+  if (e.key === 'ArrowLeft') {
+    prevMonth();
+    showToast("Bulan Sebelumnya");
+  } else if (e.key === 'ArrowRight') {
+    nextMonth();
+    showToast("Bulan Berikutnya");
+  } else if (e.key.toLowerCase() === 't') {
+    calendarDate = new Date(); // Reset ke tanggal hari ini
+    renderCalendar();
+    showToast("Kembali ke Hari Ini");
+  }
+});
 </script>
 
 <style>
@@ -1484,7 +1505,16 @@
     @keyframes modalMobileIn { from { transform: translateY(100%); } to { transform: translateY(0); } }
     
     .notif-panel { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100%; border-radius: 0; height: 100vh; }
-
+    .notif-header {
+        padding: 15px 16px !important;
+        font-size: 16px !important;
+        border-bottom: 1px solid var(--border2) !important;
+      }
+      /* Memastikan panel notifikasi mudah diakses di mobile */
+      .notif-panel {
+        width: 90vw !important;
+        right: 5vw !important;
+      }
     #toast { bottom: 72px; }
   }
 </style>
@@ -1598,7 +1628,10 @@
               <span class="notif-badge" id="notif-count" style="display: none;">0</span>
             </button>
             <div class="notif-panel" id="notif-panel" style="display: none;">
-              <div class="notif-header">Permintaan Koneksi</div>
+              <div class="notif-header" style="display: flex; justify-content: space-between; align-items: center;">
+                <span>Permintaan Koneksi</span>
+                <button onclick="toggleNotifPanel()" style="background:none; border:none; color:var(--muted); font-size:24px; cursor:pointer; line-height:1; padding:0 5px;">&times;</button>
+              </div>
               <div id="notif-list">
                 <p class="no-notif">Tidak ada notifikasi baru.</p>
               </div>
