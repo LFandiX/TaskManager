@@ -103,10 +103,12 @@
     const email = document.getElementById("reg-email").value.trim();
     const password = document.getElementById("reg-password").value;
     const confirm = document.getElementById("reg-confirm").value;
+    const termsChecked = document.getElementById("reg-terms").checked;
     const errEl = document.getElementById("reg-error");
     if (!name || !email || !password) { errEl.textContent = "Semua field harus diisi."; return; }
     if (password !== confirm) { errEl.textContent = "Password tidak cocok."; return; }
     if (password.length < 6) { errEl.textContent = "Password minimal 6 karakter."; return; }
+    if (!termsChecked) { errEl.textContent = "Anda harus menyetujui Syarat & Ketentuan."; return; }
     errEl.textContent = "";
     const btn = document.getElementById("reg-btn");
     btn.textContent = "Mendaftar..."; btn.disabled = true;
@@ -1561,6 +1563,15 @@
         <label>Konfirmasi Password</label>
         <input type="password" id="reg-confirm" placeholder="Ulangi password">
       </div>
+      
+      <!-- Terms and Conditions Checkbox -->
+      <div style="display:flex; align-items:flex-start; gap:10px; margin: 4px 0; font-size: 12px; color: var(--muted);">
+        <input id="reg-terms" type="checkbox" style="width: auto; margin-top: 3px; cursor: pointer;">
+        <label for="reg-terms" style="cursor: pointer; line-height: 1.4; text-transform: none; letter-spacing: 0;">
+          Saya setuju dengan <a href="term.html" target="_blank" style="color: var(--accent); text-decoration: underline;">Syarat & Ketentuan</a>, termasuk penggunaan email hanya untuk keperluan akun.
+        </label>
+      </div>
+
       <p class="error-msg" id="reg-error"></p>
       <div class="security-badge">🔒 Password dienkripsi SHA-256 + Firebase Auth</div>
       <button class="btn-primary" id="reg-btn" onclick="registerUser()">Buat Akun</button>
