@@ -167,6 +167,7 @@
     const desc = document.getElementById("task-desc").value.trim();
     const date = document.getElementById("task-date").value;
     const priority = document.getElementById("task-priority").value;
+    const isPrivate = document.getElementById("task-private").checked;
     const errEl = document.getElementById("task-error");
     if (!title) { errEl.textContent = "Judul tugas harus diisi."; return; }
     if (!date) { errEl.textContent = "Tanggal deadline harus diisi."; return; }
@@ -175,11 +176,12 @@
     btn.textContent = "Menyimpan..."; btn.disabled = true;
     try {
       const newRef = push(ref(db, `tasks/${currentUser.uid}`));
-      await set(newRef, { title, description: desc, dueDate: date, priority, completed: false, createdAt: Date.now() });
+      await set(newRef, { title, description: desc, dueDate: date, priority, isPrivate, completed: false, createdAt: Date.now() });
       document.getElementById("task-title").value = "";
       document.getElementById("task-desc").value = "";
       document.getElementById("task-date").value = new Date().toISOString().split("T")[0];
       document.getElementById("task-priority").value = "medium";
+      document.getElementById("task-private").checked = false;
       showToast("Tugas ditambahkan ✓");
       closeAddTaskModal();
     } catch (e) {
@@ -208,6 +210,7 @@
     document.getElementById("edit-task-desc").value = task.description || "";
     document.getElementById("edit-task-date").value = task.dueDate || "";
     document.getElementById("edit-task-priority").value = task.priority || "medium";
+    document.getElementById("edit-task-private").checked = task.isPrivate || false;
     document.getElementById("edit-task-error").textContent = "";
     document.getElementById("edit-modal").style.display = "flex";
     setTimeout(() => document.getElementById("edit-task-title").focus(), 50);
@@ -238,6 +241,7 @@
     const desc = document.getElementById("edit-task-desc").value.trim();
     const date = document.getElementById("edit-task-date").value;
     const priority = document.getElementById("edit-task-priority").value;
+    const isPrivate = document.getElementById("edit-task-private").checked;
     const errEl = document.getElementById("edit-task-error");
     if (!title) { errEl.textContent = "Judul tugas harus diisi."; return; }
     if (!date) { errEl.textContent = "Tanggal deadline harus diisi."; return; }
@@ -245,7 +249,7 @@
     const btn = document.getElementById("save-edit-btn");
     btn.textContent = "Menyimpan..."; btn.disabled = true;
     try {
-      await update(ref(db, `tasks/${currentUser.uid}/${taskId}`), { title, description: desc, dueDate: date, priority });
+      await update(ref(db, `tasks/${currentUser.uid}/${taskId}`), { title, description: desc, dueDate: date, priority, isPrivate });
       closeEditModal();
       showToast("Tugas diperbarui ✓");
     } catch (e) {
@@ -353,6 +357,7 @@
           <div class="task-body" onclick="toggleTask('${task.id}', ${task.completed})">
             <div class="task-top">
               <span class="task-title-text ${task.completed ? "crossed" : ""}">${escHtml(task.title)}</span>
+              ${task.isPrivate ? `<span class="priority-tag private-tag">🔒 Privat</span>` : ""}
               <span class="priority-tag priority-${task.priority}">${priorityLabel}</span>
             </div>
             ${task.description ? `<p class="task-desc-text">${escHtml(task.description)}</p>` : ""}
@@ -398,7 +403,12 @@
           linkedUsersData[uid] = uSnap.val();
           const tSnap = await get(ref(db, `tasks/${uid}`));
           linkedUsersData[uid].tasks = [];
-          tSnap.forEach(ch => { linkedUsersData[uid].tasks.push({ id: ch.key, ...ch.val() }); });
+          tSnap.forEach(ch => { 
+            const taskData = ch.val();
+            if (!taskData.isPrivate) {
+              linkedUsersData[uid].tasks.push({ id: ch.key, ...taskData }); 
+            }
+          });
         }
       }
       renderLinkedUsersList();
@@ -1124,6 +1134,7 @@
   .priority-high { background: rgba(255,92,92,0.15); color: #FF5C5C; }
   .priority-medium { background: rgba(255,179,71,0.15); color: #FFB347; }
   .priority-low { background: rgba(78,201,147,0.15); color: #4EC993; }
+  .private-tag { background: rgba(167,139,250,0.15); color: var(--accent2); }
 
   .task-desc-text { font-size: 12px; color: var(--text2); margin-top: 2px; font-weight: 300; line-height: 1.5; }
 
@@ -1729,6 +1740,10 @@
             <option value="low">🟢 Rendah</option>
           </select>
         </div>
+        <div class="field-group span2" style="flex-direction:row; align-items:center; gap:8px;">
+          <input type="checkbox" id="task-private" style="width:auto; cursor:pointer;">
+          <label for="task-private" style="cursor:pointer; text-transform:none; letter-spacing:0; margin-bottom:0;">🔒 Jadikan Tugas Privat (Orang lain tidak bisa melihat)</label>
+        </div>
       </div>
       <p class="error-msg" id="task-error" style="margin-top:10px"></p>
     </div>
@@ -1792,6 +1807,10 @@
             <option value="medium">🟡 Sedang</option>
             <option value="low">🟢 Rendah</option>
           </select>
+        </div>
+        <div class="field-group span2" style="flex-direction:row; align-items:center; gap:8px;">
+          <input type="checkbox" id="edit-task-private" style="width:auto; cursor:pointer;">
+          <label for="edit-task-private" style="cursor:pointer; text-transform:none; letter-spacing:0; margin-bottom:0;">🔒 Jadikan Tugas Privat (Orang lain tidak bisa melihat)</label>
         </div>
       </div>
       <p class="error-msg" id="edit-task-error" style="margin-top:10px"></p>
